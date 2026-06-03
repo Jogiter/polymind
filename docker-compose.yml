@@ -1,0 +1,115 @@
+# ============================================================================
+# PolyMind 生产编排（阿里云/腾讯云 ECS）
+# 所有密钥通过同目录 .env 文件以 ${VAR} 形式注入，切勿写死在此文件
+# 启动：docker compose up -d --build
+# ============================================================================
+
+services:
+  # --------------------------------------------------------------------------
+  # Next.js 应用（standalone，监听 3000）
+  # --------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      # 容器内通过服务名访问 db/redis
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      # 限流用 Upstash REST（可选）
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
+      # Better Auth
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL}
+      NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL}
+      # 微信开放平台
+      WECHAT_APP_ID: ${WECHAT_APP_ID}
+      WECHAT_APP_SECRET: ${WECHAT_APP_SECRET}
+      # 模型 API（海外模型走代理网关）
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_PROXY_URL: ${ANTHROPIC_PROXY_URL}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      GOOGLE_PROXY_URL: ${GOOGLE_PROXY_URL}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      # 统一时区，避免账单/限流跨时区偏差
+      TZ: UTC
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - polymind
+
+  # --------------------------------------------------------------------------
+  # PostgreSQL 16（生产建议改用云 RDS，此处为自托管备选）
+  # --------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: UTC
+    volumes:
+      # 绑定挂载到宿主机 ./pgdata，便于备份
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - polymind
+
+  # --------------------------------------------------------------------------
+  # Redis 7（会话/缓存/限流，开启 AOF 持久化）
+  # --------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - polymind
+
+  # --------------------------------------------------------------------------
+  # Nginx 反向代理 + TLS 终止（SSE 透传见 nginx.conf）
+  # --------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./proxy_params.conf:/etc/nginx/proxy_params.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      # ACME webroot 续期校验目录（与 nginx.conf 中 /.well-known 路径一致）
+      - ./certbot-www:/var/www/certbot
+    depends_on:
+      - app
+    networks:
+      - polymind
+
+volumes:
+  redis-data:
+
+networks:
+  polymind:
+    driver: bridge
